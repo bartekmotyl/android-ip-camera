@@ -1,3 +1,7 @@
+# Fork
+
+This fork changes default server mode to HTTPS to allow starting the server on old devices where starting HTTPS is a problem due to missing protocols. In some scenarios (e.g. private LAN) HTTP is "good enough". 
+
 # Android IP Camera
 
 [![downloads](https://img.shields.io/github/downloads/DigitallyRefined/android-ip-camera/total.svg)](https://github.com/DigitallyRefined/android-ip-camera/releases)
