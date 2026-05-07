@@ -49,6 +49,12 @@ class StreamingServerHelper(
     private val onClientDisconnected: () -> Unit = {},
     private val onControlCommand: (String, String) -> Unit = { _, _ -> }
 ) {
+    companion object {
+        // Set to false to serve plain HTTP (no TLS, no certificate). Useful for LAN-only deployments
+        // on older devices that lack TLS 1.2/1.3 support. Set to true to restore HTTPS.
+        const val USE_HTTPS = false
+    }
+
     data class Client(
         val socket: Socket,
         val outputStream: OutputStream,
@@ -175,122 +181,138 @@ class StreamingServerHelper(
         synchronized(this) {
               serverJob = CoroutineScope(Dispatchers.IO).launch {
               try {
-                  val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-                  val secureStorage = SecureStorage(context)
-                  val certificatePath = prefs.getString("certificate_path", null)
+                  val bindAddress = InetAddress.getByName("0.0.0.0")
 
-                  val rawPassword = secureStorage.getSecureString(SecureStorage.KEY_CERT_PASSWORD, null)
-                  val certificatePassword = rawPassword?.let {
-                      if (it.isEmpty()) null else it.toCharArray()
-                  }
-
-                  // Certificate setup required - no defaults
-                  var finalCertificatePath = certificatePath
-                  var finalCertificatePassword = certificatePassword
-
-                  if (certificatePath == null) {
-                      // Use personal certificate from assets - requires password configuration
+                  serverSocket = if (!USE_HTTPS) {
+                      // Plain HTTP — no TLS, no certificate required
                       try {
-                          val personalCertFile = File(context.filesDir, "personal_certificate.p12")
-                          if (!personalCertFile.exists()) {
-                              // Try to copy from assets first
-                              try {
-                                  context.assets.open("personal_certificate.p12").use { input ->
-                                      personalCertFile.outputStream().use { output ->
-                                          input.copyTo(output)
+                          ServerSocket(streamPort, 50, bindAddress).apply {
+                              reuseAddress = true
+                              soTimeout = 30000
+                          }
+                      } catch (e: Exception) {
+                          Handler(Looper.getMainLooper()).post {
+                              onLog("CRITICAL: Failed to create HTTP server: ${e.message}")
+                              Toast.makeText(context, "Failed to start HTTP server: ${e.message}", Toast.LENGTH_LONG).show()
+                          }
+                          return@launch
+                      }
+                  } else {
+                      val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+                      val secureStorage = SecureStorage(context)
+                      val certificatePath = prefs.getString("certificate_path", null)
+
+                      val rawPassword = secureStorage.getSecureString(SecureStorage.KEY_CERT_PASSWORD, null)
+                      val certificatePassword = rawPassword?.let {
+                          if (it.isEmpty()) null else it.toCharArray()
+                      }
+
+                      // Certificate setup required - no defaults
+                      var finalCertificatePath = certificatePath
+                      var finalCertificatePassword = certificatePassword
+
+                      if (certificatePath == null) {
+                          // Use personal certificate from assets - requires password configuration
+                          try {
+                              val personalCertFile = File(context.filesDir, "personal_certificate.p12")
+                              if (!personalCertFile.exists()) {
+                                  // Try to copy from assets first
+                                  try {
+                                      context.assets.open("personal_certificate.p12").use { input ->
+                                          personalCertFile.outputStream().use { output ->
+                                              input.copyTo(output)
+                                          }
                                       }
+                                  } catch (assetException: Exception) {
+                                      // Certificate not in assets - provide helpful error
+                                      Handler(Looper.getMainLooper()).post {
+                                          onLog("Certificate not found.")
+                                          Toast.makeText(context,
+                                              "Certificate missing, reset app to generate a new certificate",
+                                              Toast.LENGTH_LONG).show()
+                                      }
+                                      return@launch
                                   }
-                              } catch (assetException: Exception) {
-                                  // Certificate not in assets - provide helpful error
+                              }
+                              finalCertificatePath = personalCertFile.absolutePath
+
+                              // Require certificate password to be configured
+                              if (finalCertificatePassword == null) {
+                                  return@launch
+                              }
+
+                          } catch (e: Exception) {
+                              Handler(Looper.getMainLooper()).post {
+                                  onLog("ERROR: Could not load certificate: ${e.message}")
+                                  Toast.makeText(context, "Certificate error, check certificate file and password in Settings", Toast.LENGTH_LONG).show()
+                              }
+                              return@launch
+                          }
+                      }
+
+                      try {
+                          // Determine which certificate file to use
+                          val certFile = if (certificatePath != null) {
+                              // Custom certificate - copy from URI to local file
+                              val uri = certificatePath.toUri()
+                              val privateFile = File(context.filesDir, "certificate.p12")
+                              if (privateFile.exists()) privateFile.delete()
+                              context.contentResolver.openInputStream(uri)?.use { input ->
+                                  privateFile.outputStream().use { output ->
+                                      input.copyTo(output)
+                                  }
+                              } ?: throw IOException("Failed to open certificate file")
+                              privateFile
+                          } else {
+                              // Personal certificate
+                              File(finalCertificatePath!!)
+                          }
+
+                          certFile.inputStream().use { inputStream ->
+                              try {
+                                  val keyStore = KeyStore.getInstance("PKCS12")
+                                  keyStore.load(inputStream, finalCertificatePassword)
+                                  val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+                                  keyManagerFactory.init(keyStore, finalCertificatePassword)
+                                  val sslContext = SSLContext.getInstance("TLSv1.3")
+                                  sslContext.init(keyManagerFactory.keyManagers, null, null)
+                                  val sslServerSocketFactory = sslContext.serverSocketFactory
+                                  (sslServerSocketFactory.createServerSocket(streamPort, 50, bindAddress) as SSLServerSocket).apply {
+                                      reuseAddress = true
+                                      enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
+                                      enabledCipherSuites = arrayOf(
+                                          "TLS_AES_256_GCM_SHA384",
+                                          "TLS_AES_128_GCM_SHA256",
+                                          "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+                                          "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+                                      )
+                                      soTimeout = 30000
+                                  }
+                              } catch (keystoreException: Exception) {
                                   Handler(Looper.getMainLooper()).post {
-                                      onLog("Certificate not found.")
-                                      Toast.makeText(context,
-                                          "Certificate missing, reset app to generate a new certificate",
-                                          Toast.LENGTH_LONG).show()
+                                      onLog("Certificate loading failed: ${keystoreException.message}")
+                                      val errorMsg = when {
+                                          keystoreException.message?.contains("password") == true ->
+                                              "Certificate password is incorrect, check Settings > Advanced Security"
+                                          keystoreException.message?.contains("keystore") == true ->
+                                              "Certificate file is corrupted or invalid, regenerate with setup.bat"
+                                          else ->
+                                              "Certificate error: ${keystoreException.message}"
+                                      }
+                                      Toast.makeText(context, errorMsg, Toast.LENGTH_LONG).show()
                                   }
                                   return@launch
                               }
                           }
-                          finalCertificatePath = personalCertFile.absolutePath
-
-                          // Require certificate password to be configured
-                          if (finalCertificatePassword == null) {
-                              return@launch
-                          }
-
                       } catch (e: Exception) {
                           Handler(Looper.getMainLooper()).post {
-                              onLog("ERROR: Could not load certificate: ${e.message}")
-                              Toast.makeText(context, "Certificate error, check certificate file and password in Settings", Toast.LENGTH_LONG).show()
+                              onLog("CRITICAL: Failed to create HTTPS server: ${e.message}")
+                              Toast.makeText(context, "Failed to start secure HTTPS server: ${e.message}", Toast.LENGTH_LONG).show()
                           }
                           return@launch
                       }
                   }
-
-                  val bindAddress = InetAddress.getByName("0.0.0.0")
-
-                  serverSocket = try {
-                      // Determine which certificate file to use
-                      val certFile = if (certificatePath != null) {
-                          // Custom certificate - copy from URI to local file
-                          val uri = certificatePath.toUri()
-                          val privateFile = File(context.filesDir, "certificate.p12")
-                          if (privateFile.exists()) privateFile.delete()
-                          context.contentResolver.openInputStream(uri)?.use { input ->
-                              privateFile.outputStream().use { output ->
-                                  input.copyTo(output)
-                              }
-                          } ?: throw IOException("Failed to open certificate file")
-                          privateFile
-                      } else {
-                          // Personal certificate
-                          File(finalCertificatePath!!)
-                      }
-
-                      certFile.inputStream().use { inputStream ->
-                          try {
-                              val keyStore = KeyStore.getInstance("PKCS12")
-                              keyStore.load(inputStream, finalCertificatePassword)
-                              val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-                              keyManagerFactory.init(keyStore, finalCertificatePassword)
-                              val sslContext = SSLContext.getInstance("TLSv1.3")
-                              sslContext.init(keyManagerFactory.keyManagers, null, null)
-                              val sslServerSocketFactory = sslContext.serverSocketFactory
-                              (sslServerSocketFactory.createServerSocket(streamPort, 50, bindAddress) as SSLServerSocket).apply {
-                                  reuseAddress = true
-                                  enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
-                                  enabledCipherSuites = arrayOf(
-                                      "TLS_AES_256_GCM_SHA384",
-                                      "TLS_AES_128_GCM_SHA256",
-                                      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-                                      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-                                  )
-                                  soTimeout = 30000
-                              }
-                          } catch (keystoreException: Exception) {
-                              Handler(Looper.getMainLooper()).post {
-                                  onLog("Certificate loading failed: ${keystoreException.message}")
-                                  val errorMsg = when {
-                                      keystoreException.message?.contains("password") == true ->
-                                          "Certificate password is incorrect, check Settings > Advanced Security"
-                                      keystoreException.message?.contains("keystore") == true ->
-                                          "Certificate file is corrupted or invalid, regenerate with setup.bat"
-                                      else ->
-                                          "Certificate error: ${keystoreException.message}"
-                                  }
-                                  Toast.makeText(context, errorMsg, Toast.LENGTH_LONG).show()
-                              }
-                              return@launch
-                          }
-                      }
-                  } catch (e: Exception) {
-                      Handler(Looper.getMainLooper()).post {
-                          onLog("CRITICAL: Failed to create HTTPS server: ${e.message}")
-                          Toast.makeText(context, "Failed to start secure HTTPS server: ${e.message}", Toast.LENGTH_LONG).show()
-                      }
-                      return@launch
-                  }
-                  onLog("Server started on port $streamPort (${if (certificatePath != null) "HTTPS" else "HTTP"})")
+                  onLog("Server started on port $streamPort (${if (USE_HTTPS) "HTTPS" else "HTTP"})")
                   // Clear the starting flag now that server is running
                   synchronized(this@StreamingServerHelper) {
                       isStarting = false

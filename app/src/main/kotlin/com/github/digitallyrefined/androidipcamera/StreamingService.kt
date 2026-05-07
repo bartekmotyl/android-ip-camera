@@ -274,21 +274,25 @@ class StreamingService : LifecycleService() {
 
     fun startStreamingServer() {
         try {
-            // Initialize Default Certificate Logic
-            val secureStorage = SecureStorage(this)
-            val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+            if (StreamingServerHelper.USE_HTTPS) {
+                // Initialize Default Certificate Logic
+                val secureStorage = SecureStorage(this)
+                val prefs = PreferenceManager.getDefaultSharedPreferences(this)
 
-            if (CertificateHelper.certificateExists(this)) {
-                val existingCertPassword = secureStorage.getSecureString(SecureStorage.KEY_CERT_PASSWORD, null)
-                if (existingCertPassword.isNullOrEmpty()) {
-                    val certFile = File(filesDir, "personal_certificate.p12")
-                    if (certFile.exists()) certFile.delete()
-                    generateCertificateAndStart()
+                if (CertificateHelper.certificateExists(this)) {
+                    val existingCertPassword = secureStorage.getSecureString(SecureStorage.KEY_CERT_PASSWORD, null)
+                    if (existingCertPassword.isNullOrEmpty()) {
+                        val certFile = File(filesDir, "personal_certificate.p12")
+                        if (certFile.exists()) certFile.delete()
+                        generateCertificateAndStart()
+                    } else {
+                        initServer()
+                    }
                 } else {
-                    initServer()
+                    generateCertificateAndStart()
                 }
             } else {
-                generateCertificateAndStart()
+                initServer()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error starting server: ${e.message}")
@@ -342,7 +346,7 @@ class StreamingService : LifecycleService() {
             )
         }
         streamingServerHelper?.startStreamingServer()
-        Log.i(TAG, "Requested HTTPS server start on port $STREAM_PORT")
+        Log.i(TAG, "Requested ${if (StreamingServerHelper.USE_HTTPS) "HTTPS" else "HTTP"} server start on port $STREAM_PORT")
     }
 
     private fun launchMain(block: () -> Unit) {
