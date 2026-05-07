@@ -27,6 +27,7 @@ import androidx.core.content.ContextCompat
 import androidx.preference.PreferenceManager
 import com.github.digitallyrefined.androidipcamera.R
 import com.github.digitallyrefined.androidipcamera.StreamingService
+import com.github.digitallyrefined.androidipcamera.helpers.StreamingServerHelper
 import com.github.digitallyrefined.androidipcamera.databinding.ActivityMainBinding
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -151,7 +152,8 @@ class MainActivity : AppCompatActivity() {
 
         val ipAddressText = findViewById<TextView>(R.id.ipAddressText)
         val ipAddress = getLocalIpAddress()
-        ipAddressText.text = "https://$ipAddress:$STREAM_PORT"
+        val scheme = if (StreamingServerHelper.USE_HTTPS) "https" else "http"
+        ipAddressText.text = "$scheme://$ipAddress:$STREAM_PORT"
         showNoClientMessage(true)
 
         findViewById<ImageButton>(R.id.settingsButton).setOnClickListener {
