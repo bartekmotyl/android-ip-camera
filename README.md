@@ -1,6 +1,6 @@
 # Fork
 
-This fork changes default server mode to HTTPS to allow starting the server on old devices where starting HTTPS is a problem due to missing protocols. In some scenarios (e.g. private LAN) HTTP is "good enough". 
+This fork changes default server mode to HTTP to allow starting the server on old devices where starting HTTPS is a problem due to missing protocols. In some scenarios (e.g. private LAN) HTTP is "good enough". 
 
 # Android IP Camera
 
